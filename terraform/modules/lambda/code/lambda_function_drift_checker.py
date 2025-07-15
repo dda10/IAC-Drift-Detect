@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 s3 = boto3.client("s3")
 cloudtrail = boto3.client("cloudtrail")
+bedrock_runtime = boto3.client("bedrock-runtime")
 
 def lambda_handler(event, context):
     bucket = os.environ.get("TFSTATE_BUCKET")

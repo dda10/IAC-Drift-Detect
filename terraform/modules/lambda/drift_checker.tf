@@ -32,6 +32,20 @@ resource "aws_lambda_function" "drift_checker" {
   }
 }
 
+resource "aws_iam_role_policy" "bedrock_invoke" {
+  name = "bedrock-invoke"
+  role = aws_iam_role.drift_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect   = "Allow",
+      Action   = ["bedrock:InvokeModel"],
+      Resource = "*"  # You can scope this to a specific model ARN
+    }]
+  })
+}
+
 output "lambda_arn" {
   value = aws_lambda_function.drift_checker.arn
 }
