@@ -14,7 +14,29 @@ resource "aws_iam_role" "aws_config" {
 
 resource "aws_iam_role_policy_attachment" "aws_config_attach" {
   role       = aws_iam_role.aws_config.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSConfigRole"
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSConfigServiceRolePolicy"
+}
+
+resource "aws_iam_role_policy" "aws_config_s3_access" {
+  name = "AWSConfigS3AccessPolicy"
+  role = aws_iam_role.aws_config.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "s3:PutObject",
+          "s3:GetBucketAcl",
+          "s3:ListBucket"
+        ],
+        Resource = [
+          "arn:aws:s3:::${var.s3_bucket}",
+          "arn:aws:s3:::${var.s3_bucket}/*"
+        ]
+      }
+    ]
+  })
 }
 
 resource "aws_config_configuration_recorder" "config" {
