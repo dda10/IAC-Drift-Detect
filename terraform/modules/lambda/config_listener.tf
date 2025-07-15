@@ -1,6 +1,3 @@
-variable "s3_bucket" {}
-variable "sns_topic_arn" {}
-
 resource "aws_iam_role" "config_lambda" {
   name = "config-listener-role"
   assume_role_policy = jsonencode({
