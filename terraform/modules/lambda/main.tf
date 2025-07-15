@@ -19,12 +19,12 @@ resource "aws_iam_role_policy_attachment" "drift_lambda_policy" {
 }
 
 resource "aws_lambda_function" "drift_checker" {
-  filename         = "lambda/code/drift_checker.zip"
+  filename         = "${path.module}/code/drift_checker.zip"
   function_name    = "iac-drift-checker"
   role             = aws_iam_role.drift_lambda.arn
   handler          = "lambda_function_drift_checker.lambda_handler"
-  runtime          = "python3.12"
-  source_code_hash = filebase64sha256("lambda/code/drift_checker.zip")
+  runtime          = "python3.10"
+  source_code_hash = filebase64sha256("${path.module}/code/drift_checker.zip")
   environment {
     variables = {
       TFSTATE_BUCKET = var.s3_bucket
