@@ -14,7 +14,7 @@ resource "aws_iam_role" "aws_config" {
 
 resource "aws_iam_role_policy_attachment" "aws_config_attach" {
   role       = aws_iam_role.aws_config.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSConfigServiceRolePolicy"
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSConfigRole"
 }
 
 resource "aws_iam_role_policy" "aws_config_s3_access" {
