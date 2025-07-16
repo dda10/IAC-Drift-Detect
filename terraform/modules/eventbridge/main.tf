@@ -3,7 +3,7 @@ variable "s3_bucket" {}
 
 resource "aws_cloudwatch_event_rule" "cron_rule" {
   name = "iac-drift-check-cron"
-  schedule_expression = "rate(2 minutes)"
+  schedule_expression = "rate(1 hour)"
 }
 
 resource "aws_cloudwatch_event_target" "cron_target" {

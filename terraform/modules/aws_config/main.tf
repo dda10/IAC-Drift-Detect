@@ -1,4 +1,5 @@
 variable "s3_bucket" {}
+variable "config_drift_lambda_arn" {}
 
 resource "aws_iam_role" "aws_config" {
   name = "AWSConfigServiceRole"
@@ -62,10 +63,46 @@ resource "aws_config_configuration_recorder" "config" {
 resource "aws_config_delivery_channel" "channel" {
   name           = "default"
   s3_bucket_name = var.s3_bucket
-  depends_on     = [aws_config_configuration_recorder.config]
+  sns_topic_arn  = aws_sns_topic.config_topic.arn
 }
+
+resource "aws_sns_topic" "config_topic" {
+  name = "aws-config-topic"
+}
+
+
 
 resource "aws_config_configuration_recorder_status" "status" {
   name       = aws_config_configuration_recorder.config.name
   is_enabled = true
+  depends_on = [aws_config_delivery_channel.channel]
+}
+
+
+
+# EventBridge rule to capture Config changes
+resource "aws_cloudwatch_event_rule" "config_changes" {
+  name = "config-drift-changes"
+  
+  event_pattern = jsonencode({
+    source      = ["aws.config"]
+    detail-type = ["Config Configuration Item Change"]
+    detail = {
+      configurationItemStatus = ["OK", "ResourceDiscovered"]
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "config_lambda" {
+  rule      = aws_cloudwatch_event_rule.config_changes.name
+  target_id = "ConfigDriftLambda"
+  arn       = var.config_drift_lambda_arn
+}
+
+resource "aws_lambda_permission" "eventbridge_invoke" {
+  statement_id  = "AllowEventBridgeInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = var.config_drift_lambda_arn
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.config_changes.arn
 }

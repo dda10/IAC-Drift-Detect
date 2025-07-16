@@ -1,72 +1,241 @@
-# lambda_function_drift_checker.py
 import json
 import boto3
 import os
 from datetime import datetime, timedelta
 
-s3 = boto3.client("s3")
-cloudtrail = boto3.client("cloudtrail")
-bedrock_runtime = boto3.client("bedrock-runtime")
-
 def lambda_handler(event, context):
+    s3 = boto3.client("s3")
+    ec2 = boto3.client("ec2")
+    sns = boto3.client("sns")
+    cloudtrail = boto3.client("cloudtrail")
+    
     bucket = os.environ.get("TFSTATE_BUCKET")
     key = os.environ.get("TFSTATE_KEY", "terraform.tfstate")
-
-    # Load Terraform state from S3
-    state_obj = s3.get_object(Bucket=bucket, Key=key)
-    tfstate = json.load(state_obj["Body"])
-
-    # Parse managed resource IDs
-    managed_ids = set()
-    for r in tfstate.get("resources", []):
-        for i in r.get("instances", []):
-            attrs = i.get("attributes", {})
-            rid = attrs.get("id")
-            if rid:
-                managed_ids.add(rid)
-
-    # Lookup recent CloudTrail events
-    now = datetime.utcnow()
-    start_time = now - timedelta(minutes=5)
-
-    response = cloudtrail.lookup_events(
-        StartTime=start_time,
-        EndTime=now,
-        MaxResults=50
-    )
-
-    new_unmanaged = []
-    deleted_resources = []
-
-    for event in response.get("Events", []):
-        evt = json.loads(event["CloudTrailEvent"])
-        username = evt.get("userIdentity", {}).get("arn", "unknown")
-        for res in event.get("Resources", []):
-            rid = res.get("ResourceName")
-            if not rid:
-                continue
-
-            if "Create" in event["EventName"] or event["EventName"] in ["RunInstances", "CreateBucket"]:
-                if rid not in managed_ids:
-                    new_unmanaged.append({
-                        "resource_id": rid,
-                        "event": event["EventName"],
-                        "user": username,
-                        "time": str(event["EventTime"])
+    sns_topic = os.environ.get("SNS_TOPIC_ARN")
+    
+    try:
+        # Load Terraform state
+        state_obj = s3.get_object(Bucket=bucket, Key=key)
+        tfstate = json.loads(state_obj["Body"].read())
+        
+        # Extract managed resources with full attributes
+        managed_resources = {}
+        for resource in tfstate.get("resources", []):
+            if resource["type"] == "aws_instance":
+                for instance in resource.get("instances", []):
+                    attrs = instance["attributes"]
+                    managed_resources[attrs["id"]] = {
+                        "type": "EC2",
+                        "expected": {
+                            "instance_type": attrs.get("instance_type"),
+                            "tags": attrs.get("tags", {}),
+                            "security_groups": attrs.get("security_groups", []),
+                            "subnet_id": attrs.get("subnet_id")
+                        }
+                    }
+            elif resource["type"] == "aws_s3_bucket":
+                for instance in resource.get("instances", []):
+                    attrs = instance["attributes"]
+                    managed_resources[attrs["id"]] = {
+                        "type": "S3",
+                        "expected": {
+                            "tags": attrs.get("tags", {})
+                        }
+                    }
+        
+        # Get actual resources with full details
+        actual_resources = {}
+        
+        # EC2 instances
+        for reservation in ec2.describe_instances()["Reservations"]:
+            for instance in reservation["Instances"]:
+                if instance["State"]["Name"] != "terminated":
+                    actual_resources[instance["InstanceId"]] = {
+                        "type": "EC2",
+                        "actual": {
+                            "instance_type": instance.get("InstanceType"),
+                            "tags": {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])},
+                            "security_groups": [sg["GroupId"] for sg in instance.get("SecurityGroups", [])],
+                            "subnet_id": instance.get("SubnetId")
+                        }
+                    }
+        
+        # S3 buckets
+        for bucket in s3.list_buckets()["Buckets"]:
+            try:
+                tags = s3.get_bucket_tagging(Bucket=bucket["Name"])
+                bucket_tags = {tag["Key"]: tag["Value"] for tag in tags.get("TagSet", [])}
+            except:
+                bucket_tags = {}
+            actual_resources[bucket["Name"]] = {
+                "type": "S3",
+                "actual": {
+                    "tags": bucket_tags
+                }
+            }
+        
+        # Comprehensive drift analysis
+        terraform_managed_drift = []
+        unmanaged_resources_drift = []
+        deleted_managed_resources = []
+        
+        # 1. Check configuration drift in Terraform-managed resources
+        for resource_id in managed_resources:
+            if resource_id in actual_resources:
+                expected = managed_resources[resource_id]["expected"]
+                actual = actual_resources[resource_id]["actual"]
+                resource_type = managed_resources[resource_id]["type"]
+                
+                changes = []
+                for key in expected:
+                    if expected[key] != actual.get(key):
+                        changes.append(f"{key}: {expected[key]} -> {actual.get(key)}")
+                
+                if changes:
+                    user_info = get_change_author(resource_id, cloudtrail)
+                    terraform_managed_drift.append({
+                        "resource_id": resource_id,
+                        "type": resource_type,
+                        "changes": changes,
+                        "changed_by": user_info
                     })
-            elif "Delete" in event["EventName"]:
-                if rid in managed_ids:
-                    deleted_resources.append({
-                        "resource_id": rid,
-                        "event": event["EventName"],
-                        "user": username,
-                        "time": str(event["EventTime"])
-                    })
+        
+        # 2. Check unmanaged resources (not managed by Terraform)
+        unmanaged = set(actual_resources.keys()) - set(managed_resources.keys())
+        for resource_id in unmanaged:
+            resource_type = actual_resources[resource_id]["type"]
+            user_info = get_change_author(resource_id, cloudtrail)
+            unmanaged_resources_drift.append({
+                "resource_id": resource_id,
+                "type": resource_type,
+                "created_by": user_info
+            })
+        
+        # 3. Check deleted managed resources
+        deleted = set(managed_resources.keys()) - set(actual_resources.keys())
+        for resource_id in deleted:
+            resource_type = managed_resources[resource_id]["type"]
+            user_info = get_change_author(resource_id, cloudtrail)
+            deleted_managed_resources.append({
+                "resource_id": resource_id,
+                "type": resource_type,
+                "deleted_by": user_info
+            })
+        
+        drift_found = terraform_managed_drift or unmanaged_resources_drift or deleted_managed_resources
+        
+        if drift_found:
+            summary = generate_detailed_summary(terraform_managed_drift, unmanaged_resources_drift, deleted_managed_resources)
+            sns.publish(TopicArn=sns_topic, Subject="Infrastructure Drift Detected", Message=summary)
+            return {
+                "drift_detected": True, 
+                "summary": summary,
+                "terraform_managed_drift": terraform_managed_drift,
+                "unmanaged_resources": unmanaged_resources_drift,
+                "deleted_managed_resources": deleted_managed_resources
+            }
+        
+        return {"drift_detected": False, "summary": "No drift detected"}
+        
+    except Exception as e:
+        error_msg = f"Error: {str(e)}"
+        print(error_msg)
+        return {"error": error_msg}
 
-    result = {
-        "unmanaged_created_resources": new_unmanaged,
-        "deleted_managed_resources": deleted_resources
-    }
+def get_change_author(resource_id, cloudtrail):
+    # Regions to check for CloudTrail events
+    regions_to_check = ['ap-southeast-1', 'us-east-1']  # Current region + us-east-1 for global services
+    
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(days=7)  # Extend search to 7 days
+    
+    print(f"Searching for events for resource: {resource_id}")
+    
+    for region in regions_to_check:
+        try:
+            print(f"Checking region: {region}")
+            # Create CloudTrail client for specific region
+            regional_cloudtrail = boto3.client('cloudtrail', region_name=region)
+            
+            # Try multiple search methods
+            search_methods = [
+                {"AttributeKey": "ResourceName", "AttributeValue": resource_id},
+                {"AttributeKey": "EventName", "AttributeValue": "CreateBucket"} if resource_id.startswith('s3') or not resource_id.startswith('i-') else None
+            ]
+            
+            for search_attr in search_methods:
+                if search_attr is None:
+                    continue
+                    
+                print(f"Searching with: {search_attr}")
+                events = regional_cloudtrail.lookup_events(
+                    LookupAttributes=[search_attr],
+                    StartTime=start_time,
+                    EndTime=end_time,
+                    MaxResults=10
+                )
+                
+                # Filter events for our specific resource
+                for event in events.get("Events", []):
+                    event_detail = json.loads(event["CloudTrailEvent"])
+                    
+                    # Check if this event is related to our resource
+                    if (resource_id in str(event_detail) or 
+                        any(resource_id in str(resource.get("resourceName", "")) for resource in event.get("Resources", []))):
+                        
+                        user_identity = event_detail.get("userIdentity", {})
+                        result = {
+                            "user": user_identity.get("arn", "unknown").split("/")[-1] if user_identity.get("arn") else "unknown",
+                            "event": event["EventName"],
+                            "time": event["EventTime"].strftime("%Y-%m-%d %H:%M:%S"),
+                            "region": region
+                        }
+                        print(f"Found event: {result}")
+                        return result
+                        
+        except Exception as e:
+            print(f"CloudTrail lookup failed for {resource_id} in {region}: {e}")
+            continue
+    
+    print(f"No events found for {resource_id} in any region")
+    return {"user": "unknown", "event": "unknown", "time": "unknown", "region": "unknown"}
 
-    print(json.dumps(result, indent=2))
-    return result
+def generate_detailed_summary(terraform_drift, unmanaged_resources, deleted_resources):
+    summary = "=== INFRASTRUCTURE DRIFT REPORT ===\n\n"
+    
+    if terraform_drift:
+        summary += f"🔧 TERRAFORM-MANAGED RESOURCES WITH DRIFT ({len(terraform_drift)}):\n"
+        for resource in terraform_drift:
+            user_info = resource['changed_by']
+            summary += f"   • {resource['type']} {resource['resource_id']}\n"
+            summary += f"     Modified by: {user_info['user']} at {user_info['time']}\n"
+            if 'region' in user_info:
+                summary += f"     CloudTrail region: {user_info['region']}\n"
+            summary += f"     Event: {user_info['event']}\n"
+            for change in resource['changes']:
+                summary += f"     - {change}\n"
+        summary += "\n"
+    
+    if unmanaged_resources:
+        summary += f"⚠️  UNMANAGED RESOURCES (NOT IN TERRAFORM) ({len(unmanaged_resources)}):\n"
+        for resource in unmanaged_resources:
+            user_info = resource['created_by']
+            summary += f"   • {resource['type']} {resource['resource_id']}\n"
+            summary += f"     Created by: {user_info['user']} at {user_info['time']}\n"
+            if 'region' in user_info:
+                summary += f"     CloudTrail region: {user_info['region']}\n"
+            summary += f"     Event: {user_info['event']}\n"
+        summary += "\n"
+    
+    if deleted_resources:
+        summary += f"❌ DELETED TERRAFORM-MANAGED RESOURCES ({len(deleted_resources)}):\n"
+        for resource in deleted_resources:
+            user_info = resource['deleted_by']
+            summary += f"   • {resource['type']} {resource['resource_id']}\n"
+            summary += f"     Deleted by: {user_info['user']} at {user_info['time']}\n"
+            if 'region' in user_info:
+                summary += f"     CloudTrail region: {user_info['region']}\n"
+            summary += f"     Event: {user_info['event']}\n"
+    
+    return summary
+
