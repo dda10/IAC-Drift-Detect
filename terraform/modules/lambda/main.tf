@@ -26,12 +26,22 @@ resource "aws_iam_role_policy" "drift_lambda_permissions" {
         Action = [
           "s3:GetObject",
           "s3:ListBuckets",
+          "s3:ListObjectVersions",
+          "s3:GetObjectVersion",
           "s3:GetBucketTagging",
           "ec2:DescribeInstances",
+          "ec2:DescribeVpcs",
+          "lambda:ListFunctions",
+          "rds:DescribeDBInstances",
+          "rds:ListTagsForResource",
+          "dynamodb:ListTables",
+          "iam:ListUsers",
+          "logs:DescribeLogGroups",
+          "ecs:ListClusters",
+          "eks:ListClusters",
           "sns:Publish",
           "bedrock:InvokeModel",
-          "cloudtrail:LookupEvents",
-          "config:GetResourceConfigHistory"
+          "cloudtrail:LookupEvents"
         ]
         Resource = "*"
       }
@@ -43,9 +53,10 @@ resource "aws_lambda_function" "drift_checker" {
   filename         = "${path.module}/code/drift_checker.zip"
   function_name    = "iac-drift-checker"
   role             = aws_iam_role.drift_lambda.arn
-  handler          = "lambda_function_drift_checker.lambda_handler"
+  handler          = "simple_drift_checker.lambda_handler"
   runtime          = "python3.10"
-  timeout          = 30
+  timeout          = 10
+  memory_size     = 256
   source_code_hash = filebase64sha256("${path.module}/code/drift_checker.zip")
   environment {
     variables = {

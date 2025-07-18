@@ -10,7 +10,7 @@ module "sns" {
 module "aws_config" {
   source = "./modules/aws_config"
   s3_bucket = module.s3.bucket_name
-  config_drift_lambda_arn = module.lambda.config_drift_arn
+  config_drift_lambda_arn = module.lambda.lambda_arn
 }
 
 module "lambda" {
@@ -23,6 +23,11 @@ module "evenbridge" {
   source = "./modules/eventbridge"
   lambda_arn = module.lambda.lambda_arn
   s3_bucket = module.s3.bucket_name  
+}
+
+module "bedrock" {
+  source = "./modules/bedrock"
+  # drift_lambda_arn = module.lambda.lambda_arn
 }
 
 resource "aws_lambda_permission" "s3_invoke" {
