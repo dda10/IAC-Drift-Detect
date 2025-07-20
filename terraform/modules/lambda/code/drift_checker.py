@@ -57,10 +57,12 @@ def run_full_drift_detection():
     """Run comprehensive drift detection"""
     s3 = boto3.client("s3")
     sns = boto3.client("sns")
+    lambda_client = boto3.client("lambda")
     
     bucket = os.environ.get("TFSTATE_BUCKET")
     key = os.environ.get("TFSTATE_KEY", "terraform.tfstate")
     sns_topic = os.environ.get("SNS_TOPIC_ARN")
+    bedrock_analyzer_arn = os.environ.get("BEDROCK_ANALYZER_ARN")
     
     try:
         # Load Terraform state
@@ -193,8 +195,39 @@ def run_full_drift_detection():
         # Generate report
         drift_found = unmanaged_resources or deleted_resources or modified_resources
         if drift_found:
+            # Generate technical summary for logging
             summary = generate_summary(unmanaged_resources, deleted_resources, modified_resources)
-            sns.publish(TopicArn=sns_topic, Subject="Infrastructure Drift Detected", Message=summary)
+            
+            # Call Bedrock analyzer for human-readable analysis
+            if bedrock_analyzer_arn:
+                try:
+                    # Prepare detailed drift report for Bedrock
+                    drift_report = {
+                        "unmanaged_resources": unmanaged_resources,
+                        "deleted_resources": deleted_resources,
+                        "modified_resources": modified_resources,
+                        "summary": summary,
+                        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                    }
+                    
+                    print(f"Invoking Bedrock analyzer: {bedrock_analyzer_arn}")
+                    # Invoke Bedrock analyzer asynchronously
+                    response = lambda_client.invoke(
+                        FunctionName=bedrock_analyzer_arn,
+                        InvocationType='Event',  # Asynchronous
+                        Payload=json.dumps({
+                            "drift_report": drift_report
+                        })
+                    )
+                    print(f"Bedrock analyzer invoked: {response}")
+                except Exception as e:
+                    print(f"Error invoking Bedrock analyzer: {e}")
+                    # Fallback to direct SNS notification if Bedrock fails
+                    sns.publish(TopicArn=sns_topic, Subject="Infrastructure Drift Detected (Bedrock Failed)", Message=summary)
+            else:
+                # Fallback if Bedrock analyzer ARN is not configured
+                sns.publish(TopicArn=sns_topic, Subject="Infrastructure Drift Detected", Message=summary)
+            
             return {
                 "drift_detected": True,
                 "unmanaged_count": len(unmanaged_resources),
